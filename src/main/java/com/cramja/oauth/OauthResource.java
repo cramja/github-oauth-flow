@@ -5,6 +5,7 @@ import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
@@ -14,6 +15,7 @@ import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.MultivaluedMap;
+import javax.ws.rs.core.NewCookie;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
 import javax.ws.rs.core.UriBuilder;
@@ -83,12 +85,31 @@ public class OauthResource {
 
     private Client client = ResteasyClientBuilder.newClient();
     private Map<String, GithubAuthReq> outstandingRequests = new HashMap<>();
+    private Map<String, String> accessTokens = new HashMap<>();
 
     @Context HttpServletRequest request;
 
+    @Path("/home")
+    @Produces(MediaType.APPLICATION_JSON)
     @GET
     public Response home() {
-        return Response.ok().entity("").build();
+        Cookie sessionCookie = null;
+        for (Cookie cookie : request.getCookies()) {
+            if (cookie.getName().equals("session")) {
+                sessionCookie = cookie;
+            }
+        }
+        if (sessionCookie == null) {
+            return Response.seeOther(UriBuilder.fromPath("/oauth/login").build()).build();
+        }
+
+        String token = accessTokens.get(sessionCookie.getValue());
+        final String bearer = "Bearer " + token;
+        final String teamsJson = client.target("https://api.github.com/user/teams").request().header("Authorization", bearer).get().readEntity(String.class);
+        final String orgsJson = client.target("https://api.github.com/user/orgs").request().header("Authorization", bearer).get().readEntity(String.class);
+        return Response.ok()
+                .entity("{\"teams\":" + teamsJson + ",\"orgs\":" + orgsJson + "}")
+                .build();
     }
 
     @GET
@@ -106,16 +127,13 @@ public class OauthResource {
         if (response.getStatus() != 200) {
             return Response.status(Status.BAD_REQUEST).entity("not accepted by github").build();
         }
+        MultivaluedMap<String,String> entity = response.readEntity(MultivaluedMap.class);
 
-        final MultivaluedMap<String,String> entity = response.readEntity(MultivaluedMap.class);
-        final String bearer = "Bearer " + entity.get("access_token").get(0);
-        StringBuilder sb = new StringBuilder("{\"teams\":")
-                .append(client.target("https://api.github.com/user/teams").request().header("Authorization", bearer).get().readEntity(String.class))
-                .append(",\"orgs\":")
-                .append(client.target("https://api.github.com/user/orgs").request().header("Authorization", bearer).get().readEntity(String.class))
-                .append("}");
-
-        return Response.ok().entity(sb.toString()).build();
+        final String sessionId = UUID.randomUUID().toString();
+        accessTokens.put(sessionId, entity.get("access_token").get(0));
+        return Response.seeOther(UriBuilder.fromPath("/oauth/home").build())
+                .cookie(new NewCookie("session", sessionId))
+                .build();
     }
 
     @GET
